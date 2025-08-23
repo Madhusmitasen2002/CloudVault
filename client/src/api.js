@@ -3,7 +3,7 @@ import axios from "axios";
 
 // ----- Axios instance -----
 const api = axios.create({
-  baseURL: "http://localhost:3000/api",
+  baseURL: "https://cloudvault-1-ac6o.onrender.com/api",
 });
 
 // ----- Auth token handling -----
