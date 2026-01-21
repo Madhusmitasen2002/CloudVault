@@ -113,6 +113,15 @@ export const getFolders = async (parentId = null) => {
   return res.data;
 };
 
+// ----- File Actions -----
+
+export const deleteFile = (id) => {
+  return api.delete(`/files/${id}`);
+};
+
+export const renameFile = (id, name) => {
+  return api.patch(`/files/${id}/rename`, { name });
+};
 
 
 export default api;

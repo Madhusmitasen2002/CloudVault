@@ -3,9 +3,6 @@ import multer from "multer";
 import supabase from "../supabase/supabaseClient.js";
 import { verifyToken } from "../middleware/authMiddleware.js";
 import { v4 as uuidv4 } from "uuid";
-import path from "path";
-import { fileURLToPath } from "url";
-import fs from "fs";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -13,155 +10,152 @@ const upload = multer({ storage: multer.memoryStorage() });
 const BUCKET = "files";
 const bucket = supabase.storage.from(BUCKET);
 
-// ES module __dirname fix
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// ---------- Upload File from Frontend ----------
+/* =====================================================
+   UPLOAD FILE
+===================================================== */
+router.post(
+  "/upload",
+  verifyToken,
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const file = req.file;
+      const folderId = req.body.folder_id || null;
 
+      if (!file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
 
-// Assuming 'upload' is multer middleware configured properly.
+      // Unique path inside Supabase Storage
+      const storagePath = `${userId}/${uuidv4()}-${file.originalname}`;
 
-router.post("/upload", verifyToken,upload.single("file"), async (req, res) => {
-  try {
-     console.log("req.user:", req.user);
+      // Upload to Supabase Storage
+      const { error: uploadError } = await bucket.upload(
+        storagePath,
+        file.buffer,
+        {
+          contentType: file.mimetype,
+          upsert: false,
+        }
+      );
+      if (uploadError) throw uploadError;
 
-    console.log("foler_id", req.body.folder_id);
-    const file = req.file;
+      // Insert DB record
+      const { data, error: dbError } = await supabase
+        .from("files")
+        .insert({
+          file_name: file.originalname,
+          file_type: file.mimetype,
+          file_path: storagePath,
+          user_id: userId,
+          folder_id: folderId,
+          is_deleted: false,
+        })
+        .select()
+        .single();
 
-    if (!file) {
-      return res.status(400).json({ error: "No file uploaded" });
+      if (dbError) throw dbError;
+
+      res.json({ file: data });
+    } catch (err) {
+      console.error("Upload error:", err);
+      res.status(500).json({ error: err.message });
     }
-   const userId = req.user.id;
-   
-    const  folder_id  = req.body.folder_id;
-    const folderId = folder_id && folder_id !== "undefined" ? parseInt(folder_id, 10) : null;
-    
-    
-    
-    // Generate unique file name to avoid collisions
-    const uniqueFileName = `${uuidv4()}-${file.originalname}`;
+  }
+);
 
-    // Destination path inside uploads folder
-    const uploadPath = path.join(__dirname, "..", "uploads", uniqueFileName);
+/* =====================================================
+   GET FILES (with signed download URLs)
+===================================================== */
+router.get("/", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const parentId = req.query.parent_id ?? null;
 
-    // Write the file buffer to disk
-    fs.writeFileSync(uploadPath, file.buffer);
+    let query = supabase
+      .from("files")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("is_deleted", false);
 
-    // The path you want to save in DB can be relative to your project or just file name
-    // For example: "uploads/uniqueFileName"
-    const filePathForDB = `uploads/${uniqueFileName}`;
-    console.log("Inserting into files table:", {
-    file_name: file.originalname,
-    file_path: filePathForDB,
-    user_id: userId,
-    folder_id: folderId,
+    if (parentId !== null && parentId !== "null") {
+      query = query.eq("folder_id", parentId);
+    } else {
+      query = query.is("folder_id", null);
+    }
+
+    const { data: files, error } = await query;
+    if (error) throw error;
+
+    // Attach signed download URLs
+    const filesWithUrls = await Promise.all(
+      files.map(async (file) => {
+        const { data } = await bucket.createSignedUrl(
+          file.file_path,
+          60
+        );
+
+        return {
+          ...file,
+          download_url: data?.signedUrl || null,
+        };
+      })
+    );
+
+    res.json({ files: filesWithUrls });
+  } catch (err) {
+    console.error("Fetch files error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
+/* =====================================================
+   RENAME FILE
+===================================================== */
+router.patch("/:id/rename", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+    const { name } = req.body;
 
-    // Insert into DB
-    const { data, error: dbError } = await supabase
+    const { data, error } = await supabase
       .from("files")
-      .insert({
-        file_name: file.originalname,
-        file_path: filePathForDB,  // relative path to the file on disk
-        user_id: userId,
-        folder_id: folderId,
-      })
+      .update({ file_name: name })
+      .eq("id", id)
+      .eq("user_id", userId)
       .select()
       .single();
 
-    if (dbError) throw dbError;
-
-    res.json({ message: "File uploaded and saved locally successfully", file: data });
-  } catch (err) {
-    console.error("Upload error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-
-
-router.get("/", verifyToken, async (req, res) => {
-  try {
-    console.log("Authenticated user ID:", req.user.id);
-
-    const userId = req.user.id;
-
-    const { data: files, error } = await supabase
-      .from("files")
-      .select("*")
-      .eq("user_id", userId);
-
     if (error) throw error;
 
-    console.log("Files fetched:", files);
-
-    res.json({ files });
+    res.json(data);
   } catch (err) {
-    console.error("Fetch all files error:", err);
+    console.error("Rename error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-
-
-
-// ---------- Download file ----------
-router.get("/:id/download", verifyToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const fileId = req.params.id;
-
-    const { data: file, error } = await supabase
-      .from("files")
-      .select("*")
-      .eq("id", fileId)
-      .eq("user_id", userId)
-      .single();
-
-    if (error || !file) return res.status(404).json({ error: "File not found" });
-
-    const { data: signedData, error: urlError } = await bucket.createSignedUrl(
-      file.file_path,
-      60
-    );
-    if (urlError) throw urlError;
-
-    res.json({ url: signedData.signedUrl });
-  } catch (err) {
-    console.error("Download error:", err.message);
-    res.status(500).json({ error: "Failed to download file" });
-  }
-});
-
-// ---------- Delete file ----------
+/* =====================================================
+   DELETE FILE (SOFT DELETE)
+===================================================== */
 router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const fileId = req.params.id;
 
-    const { data: file, error } = await supabase
+    const { error } = await supabase
       .from("files")
-      .select("*")
+      .update({ is_deleted: true })
       .eq("id", fileId)
-      .eq("user_id", userId)
-      .single();
+      .eq("user_id", userId);
 
-    if (error || !file) return res.status(404).json({ error: "File not found" });
+    if (error) throw error;
 
-    // Remove from storage
-    const { error: storageError } = await bucket.remove([file.file_path]);
-    if (storageError) throw storageError;
-
-    // Remove from DB
-    const { error: dbError } = await supabase.from("files").delete().eq("id", fileId);
-    if (dbError) throw dbError;
-
-    res.json({ message: "File deleted successfully" });
+    res.json({ success: true });
   } catch (err) {
-    console.error("Delete error:", err.message);
-    res.status(500).json({ error: "Failed to delete file" });
+    console.error("Delete error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
